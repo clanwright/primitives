@@ -65,7 +65,7 @@ in
       }) active;
     };
 
-    services.postgresql.package = lib.mkIf (active != { }) domainPkgs.postgresql_17;
+    services.postgresql.package = lib.mkIf (active != { }) domainPkgs.postgresql_18;
 
     clan.core.state = lib.mapAttrs' (
       name: db:

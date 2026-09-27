@@ -25,7 +25,7 @@ let
                   couchdb3 = previous.couchdb3.overrideAttrs (_: {
                     pname = "foreign-couchdb";
                   });
-                  postgresql_17 = previous.postgresql_17.overrideAttrs (_: {
+                  postgresql_18 = previous.postgresql_18.overrideAttrs (_: {
                     pname = "foreign-postgresql";
                   });
                 }
@@ -121,7 +121,7 @@ let
     evaluate "disabled-retained" "disabled-retained" "disabled-retained" false
       true;
   expectedCouch = nixpkgs.legacyPackages.x86_64-linux.couchdb3.outPath;
-  expectedPostgres = nixpkgs.legacyPackages.x86_64-linux.postgresql_17.outPath;
+  expectedPostgres = nixpkgs.legacyPackages.x86_64-linux.postgresql_18.outPath;
 in
 assert
   active.failedAssertions == [ ]
@@ -139,7 +139,7 @@ assert
 assert
   active.couchRestart == [ "couchdb.service" ]
   && active.couchPackage == expectedCouch
-  && active.couchVersion == "3.5.1";
+  && active.couchVersion == "3.5.2";
 assert
   active.postgresEnabled
   &&
@@ -151,7 +151,7 @@ assert
   active.alphaOwner == "alpha-user"
   && active.alphaStateName == "alpha-db"
   && active.alphaRestoreUnits == [ "alpha-app.service" ];
-assert active.postgresPackage == expectedPostgres && active.postgresVersion == "17.10";
+assert active.postgresPackage == expectedPostgres && active.postgresVersion == "18.6";
 assert
   retained.couchEnabled == false
   && retained.couchRestart == [ ]
