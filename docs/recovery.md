@@ -73,7 +73,8 @@ commands with shell glue; no project Python runtime or Restic dependency.
   Capture copies view indexes before `.couch` files, omits config/cookies, and
   never changes source service state. Use the actual database directory and
   source node name. Validation copies to scratch, starts CouchDB with disposable
-  authentication, reads database contents, then calls the owner command with
+  authentication, reads full document contents in pages of 32 rows with a 30-second
+  request deadline, then calls the owner command with
   `COUCHDB_URL`, `COUCHDB_USER`, `COUCHDB_PASSWORD` for that disposable instance.
 
 CouchDB's documented hot copy provides file consistency, not a single atomic

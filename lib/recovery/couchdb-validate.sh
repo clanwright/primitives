@@ -66,7 +66,7 @@ epmd_started=true
 # PID/network containment and its overall budget remain the runner's job.
 timeout --kill-after=5s 30m couchdb > "$work/couchdb.log" 2>&1 &
 server_pid=$!
-http() { curl --fail --silent --show-error --max-time 5 --user "$COUCHDB_USER:$COUCHDB_PASSWORD" "$COUCHDB_URL$1"; }
+http() { curl --fail --silent --show-error --max-time "${2:-5}" --user "$COUCHDB_USER:$COUCHDB_PASSWORD" "$COUCHDB_URL$1"; }
 ready=false
 for _ in $(seq 1 100); do
   kill -0 "$server_pid" 2>/dev/null || fail 'disposable CouchDB exited before readiness'
@@ -77,6 +77,37 @@ done
 http /_all_dbs > "$work/databases.json"
 jq -e 'type == "array" and all(.[]; type == "string")' "$work/databases.json" >/dev/null
 while IFS= read -r database; do
-  http "/$database/_all_docs?include_docs=true" | jq -e '.rows | type == "array" and all(.[]; has("doc") and (has("error") | not))' >/dev/null
+  # Parse bounded pages only after curl has finished, so jq cannot backpressure
+  # a large response into the HTTP timeout. Readiness retains its 5s budget.
+  cursor=null
+  total=null
+  seen=0
+  query="/$database/_all_docs?include_docs=true&limit=32"
+  while true; do
+    http "$query" 30 > "$work/documents.json"
+    jq -e --argjson cursor "$cursor" --argjson total "$total" --argjson seen "$seen" '
+      type == "object" and (has("error") | not) and
+      (.total_rows | type == "number" and . >= 0 and . == floor) and
+      ($total == null or .total_rows == $total) and .offset == $seen and
+      (.rows | type == "array" and length <= 32 and
+        all(.[];
+          type == "object" and (has("error") | not) and
+          (.id | type == "string") and .key == .id and
+          (.doc | type == "object") and .doc._id == .id and
+          .id != $cursor) and
+        ([.[].id] | length == (unique | length)))
+    ' "$work/documents.json" >/dev/null || fail 'invalid CouchDB document page or pagination progress'
+    total=$(jq -r '.total_rows' "$work/documents.json")
+    count=$(jq -r '.rows | length' "$work/documents.json")
+    seen=$((seen + count))
+    (( seen <= total )) || fail 'CouchDB document count exceeded total'
+    if (( count < 32 )); then
+      (( seen == total )) || fail 'incomplete CouchDB document scan'
+      break
+    fi
+    cursor=$(jq -c '.rows[-1].id' "$work/documents.json")
+    startkey=$(jq -r '.rows[-1].id | tojson | @uri' "$work/documents.json")
+    query="/$database/_all_docs?include_docs=true&limit=32&startkey=$startkey&skip=1"
+  done
 done < <(jq -r '.[] | @uri' "$work/databases.json")
 "$CHECK_COMMAND"
