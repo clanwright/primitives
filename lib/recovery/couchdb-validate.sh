@@ -1,5 +1,4 @@
-# shellcheck source=lib/recovery/common.sh
-source "$RECOVERY_COMMON"
+# Common helper functions are prepended by the native application writer.
 validator_input "$@"
 input=$1
 jq -e --arg node "$NODE_NAME" '. == {format:"primitives-couchdb-files-v1",version:"3.5.2",nodeName:$node}' "$input/couchdb-recovery.json" >/dev/null || fail 'unsupported CouchDB artifact format/version/node identity'

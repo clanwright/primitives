@@ -1,5 +1,4 @@
-# shellcheck source=lib/recovery/common.sh
-source "$RECOVERY_COMMON"
+# Common helper functions are prepended by the native application writer.
 validator_input "$@"
 input=$1
 dump=$input/$DUMP_RELATIVE_PATH

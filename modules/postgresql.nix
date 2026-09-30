@@ -15,7 +15,7 @@ in
 {
   options.services.clanwright.primitives.postgresql.databases = lib.mkOption {
     default = { };
-    description = "Independent PostgreSQL database requests; attribute names are database names.";
+    description = "Independent PostgreSQL database requests; attribute names are database names and must be non-empty path components other than '.' or '..'.";
     type = lib.types.attrsOf (
       lib.types.submodule (
         { name, ... }: {
@@ -49,6 +49,12 @@ in
 
   config = lib.mkIf (cfg.databases != { }) {
     assertions = [
+      {
+        assertion = lib.all (name: name != "" && name != "." && name != ".." && !lib.hasInfix "/" name) (
+          builtins.attrNames cfg.databases
+        );
+        message = "Primitives PostgreSQL database names must be non-empty path components other than '.' or '..'.";
+      }
       {
         assertion = builtins.length stateNames == builtins.length (lib.unique stateNames);
         message = "Primitives PostgreSQL requests must have distinct stateName values.";

@@ -1,4 +1,4 @@
-# Sourced only by the immutable helper scripts.
+# Prepended to the native helper applications.
 set -euo pipefail
 umask 077
 export LANG=C LC_ALL=C

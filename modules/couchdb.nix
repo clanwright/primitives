@@ -39,6 +39,16 @@ in
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
       {
+        clan.core.state."${cfg.stateName}".folders = [ "/var/lib/couchdb" ];
+        sops.secrets."${cfg.adminConfigSecretName}" = {
+          path = "/run/secrets/${cfg.adminConfigSecretName}";
+          owner = "couchdb";
+          group = "couchdb";
+          mode = "0400";
+          restartUnits = lib.optional active "couchdb.service";
+        };
+      }
+      (lib.mkIf (!active) {
         users.users.couchdb = {
           description = "CouchDB Server user";
           group = "couchdb";
@@ -54,16 +64,12 @@ in
           gid = config.ids.gids.couchdb;
           name = "couchdb";
         };
-        clan.core.state."${cfg.stateName}".folders = [ "/var/lib/couchdb" ];
-        sops.secrets."${cfg.adminConfigSecretName}" = {
-          path = "/run/secrets/${cfg.adminConfigSecretName}";
-          owner = "couchdb";
-          group = "couchdb";
-          mode = "0400";
-          restartUnits = lib.optional active "couchdb.service";
-        };
-      }
+      })
       (lib.mkIf active {
+        users.users.couchdb = {
+          isSystemUser = true;
+          shell = "${pkgs.shadow}/bin/nologin";
+        };
         services.couchdb = {
           enable = true;
           package = domainPkgs.couchdb3;

@@ -1,5 +1,4 @@
-# shellcheck source=lib/recovery/common.sh
-source "$RECOVERY_COMMON"
+# Common helper functions are prepended by the native application writer.
 absolute_directory "$@"
 output=$1
 [[ $(stat -c %a "$output") == 700 && $(stat -c %u "$output") == "$(id -u)" ]] || fail 'output must be private and owned by the capture account'

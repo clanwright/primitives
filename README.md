@@ -1,63 +1,57 @@
 # Primitives
 
-Primitives exports composable `nixosModules.couchdb`,
-`nixosModules.postgresql`, and opt-in `nixosModules.recovery` modules. Import a
-module into a NixOS host with Clan and SOPS modules already present. Callers set
-typed options under `services.clanwright.primitives`; the installation supplies
-encrypted SOPS material and selects the host. These modules do not provision
-credentials or network ingress.
+Primitives provides generic CouchDB and PostgreSQL NixOS modules with retained
+Clan state, plus native database recovery helper packages. Application policy,
+ingress, credentials and deployment belong to consumers.
 
-`couchdb` composes the native NixOS CouchDB service with a fixed loopback
-listener on `127.0.0.1:5984`, CouchDB 3 from this flake's pinned package set,
-Clan state at `/var/lib/couchdb`, stable native UID/GID, and SOPS administrator
-INI metadata. Set `services.clanwright.primitives.couchdb.enable = true` with
-`stateName`, `adminConfigSecretName`, and optional native `extraConfig`. The
-default `lifecycle = "enabled"` runs CouchDB; `"disabled-retained"` removes the
-runtime while preserving state, identity, and secret metadata. The caller owns
-the secret value and any application-specific authentication, CORS, sizing, or
-HTTP policy.
+Import `primitives.nixosModules.couchdb` or `primitives.nixosModules.postgresql`
+into a NixOS host with Clan and SOPS modules available. Database modules select
+CouchDB **3.5.2** and PostgreSQL **18.6** from this flake's locked Nixpkgs input,
+independently of host overlays. This explicit authority keeps retained state and
+recovery package selection predictable; pin changes require compatibility review.
 
-`postgresql` takes independent requests under
-`services.clanwright.primitives.postgresql.databases.<databaseName>`. Each entry
-sets `user`, `stateName`, optional `restoreStopUnits`, and optional `lifecycle`
-(default `"enabled"`). Active entries delegate role creation, database
-ownership, state, backup, and restore semantics to `clan.core.postgresql` while
-selecting PostgreSQL 18 from this flake's pinned package set. A
-`"disabled-retained"` entry registers only its existing
-`/var/backup/postgres/<databaseName>` path under `stateName`; it does not start
-PostgreSQL or recreate the database. An application owns its own data state and
-orders its systemd unit after and requires `postgresql.service`.
+## Module options
 
-The current package baseline is CouchDB 3.5.2 and PostgreSQL 18.6 from the
-locked nixpkgs input. Changing that pin requires compatibility review. The
-modules have no dependency on any application or installation repository.
-The project is licensed under the [MIT License](LICENSE).
+All options are under `services.clanwright.primitives`.
 
-The standalone `lib.contractCheck` evaluates both modules in a real Clan host
-fixture using the exact locked public Clan and nixpkgs inputs. It covers active,
-partly retained and wholly retained states, two database requests, restore
-mapping, SOPS metadata, no firewall opening, and package identity even with a
-different host package overlay. Run `nix eval --json .#lib.contractCheck` from
-this directory. This evaluates desired state; it does not test a deployed
-service or execute backup/restore.
+| Module | Options | Behavior |
+| --- | --- | --- |
+| `couchdb` | `enable` (default false), required `stateName` and `adminConfigSecretName`, optional `extraConfig` (default `{ }`), `lifecycle` | Enabled service binds `127.0.0.1:5984`; registers `/var/lib/couchdb`, native stable UID/GID and mode-0400 SOPS administrator INI metadata. Caller supplies encrypted secret and application configuration. |
+| `postgresql.databases.<name>` | Required `stateName`; `user` (default database name), `restoreStopUnits` (default `[ ]`), `lifecycle` | Active requests delegate roles, database ownership, state and restore semantics to `clan.core.postgresql`. Names must be nonempty path components other than `.` or `..`; state names must be distinct. |
 
-Recovery declarations and generic database helpers are documented in
-[the recovery contract](docs/recovery.md). Primitives uses native Clan PostgreSQL
-capture and database tools; Apps owns application consistency and semantic checks;
-Reliability owns isolation, schedules and Restic repository operations. There is
-no Restic dependency or project-owned Python runtime in these helpers.
-See [release verification](docs/verification.md) for checks and their scope.
+Both lifecycles default to `"enabled"`. CouchDB `"disabled-retained"` requires
+`enable = true` and preserves state, identity and secret metadata without its
+runtime. PostgreSQL `"disabled-retained"` registers the existing
+`/var/backup/postgres/<name>` path without requesting its runtime/database.
+Applications own their other data state and service ordering.
+
+```nix
+{
+  imports = [ primitives.nixosModules.postgresql ];
+  services.clanwright.primitives.postgresql.databases.app = {
+    stateName = "app-db";
+    restoreStopUnits = [ "app.service" ];
+  };
+}
+```
+
+## Recovery and verification
+
+[Recovery helpers](docs/recovery.md) owns the package API, component authority,
+artifact behavior and resource requirements. [Verification](docs/verification.md)
+owns required repository gates, available native checks and the single consumer
+PREDEPLOY boundary. Apps owns consistency, publication, readers and semantic
+checks. Reliability consumes Apps' public interface separately; it is neither a
+Primitives product nor test dependency.
 
 ## PostgreSQL major-version migration
 
-The previous v0.1.0 baseline selected PostgreSQL 17.10; the new baseline selects
-PostgreSQL 18. Updating this input does not migrate a running database. Consumers
-must plan and test `pg_upgrade` or a logical dump/restore before activating the
-new module on an existing PostgreSQL 17 installation. Preserve the old pinned
-configuration and compatible recovery handlers until historical backups and the
-new application/database combination have been accepted. Do not start PostgreSQL
-18 against PostgreSQL 17's data directory.
+Selecting PostgreSQL 18 does not migrate an existing database. Before activating
+these modules over an older major, the consumer must plan and test `pg_upgrade`
+or logical dump/restore. Never start PostgreSQL 18 on an older-major data directory.
+Retain compatible pinned configuration, database/extensions, application versions
+and recovery handlers until existing artifacts and the migrated application are
+accepted. See [PostgreSQL upgrade guidance](https://www.postgresql.org/docs/18/upgrading.html).
 
-This repository does not deploy the update, migrate production data, change
-credentials or execute production restores. See PostgreSQL's
-[major-version upgrade guidance](https://www.postgresql.org/docs/18/upgrading.html).
+This repository provides configuration and generic tools; production migration
+and restore remain consumer operations. Licensed under the [MIT License](LICENSE).

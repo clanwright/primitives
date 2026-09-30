@@ -1,5 +1,8 @@
 { pkgs }:
 let
+  postgresql = pkgs.postgresql_18;
+  couchdb = pkgs.couchdb3;
+  erlang = pkgs.beamMinimalPackages.erlang;
   tools = import ../lib/recovery-tools.nix { inherit pkgs; };
   sandboxDriver = pkgs.writeShellScript "recovery-sandbox-driver" ''
     set +e
@@ -54,8 +57,9 @@ let
   '';
   pgCallback = pkgs.writeShellApplication {
     name = "postgres-owner-invariants";
-    runtimeInputs = [ pkgs.postgresql_18 ];
+    runtimeInputs = [ postgresql ];
     text = ''
+      echo POSTGRES_OWNER_CALLBACK_REACHED
       test "$(psql -X -Atc 'SELECT value FROM meaningful_fixture WHERE id = 1')" = preserved
     '';
   };
@@ -66,7 +70,7 @@ let
       pkgs.jq
     ];
     text = ''
-      curl --fail --silent --user "$COUCHDB_USER:$COUCHDB_PASSWORD" "$COUCHDB_URL/fixture/meaningful" | jq -e '.value == "preserved"' >/dev/null
+      curl --fail --silent --show-error --max-time 10 --user "$COUCHDB_USER:$COUCHDB_PASSWORD" "$COUCHDB_URL/fixture/meaningful" | jq -e '.value == "preserved"' >/dev/null
     '';
   };
   rejectCallback = pkgs.writeShellApplication {
@@ -79,39 +83,49 @@ let
     name = "wait-owner-invariants";
     runtimeInputs = [ pkgs.coreutils ];
     text = ''
+      fifo=$(mktemp -u "$TMPDIR/callback-wait.XXXXXXXX")
+      mkfifo "$fifo"
+      exec 3<>"$fifo"
+      rm "$fifo"
       echo VALIDATOR_CALLBACK_READY
-      sleep 30
+      read -r -t 60 -u 3 || exit 1
     '';
   };
   pgValidator = tools.mkPostgresqlValidator {
     dumpRelativePath = "pg-dump";
     database = "validation";
-    checkCommand = pkgs.lib.getExe pgCallback;
+    inherit postgresql;
+    check = pgCallback;
   };
   pgRejectValidator = tools.mkPostgresqlValidator {
+    inherit postgresql;
     dumpRelativePath = "pg-dump";
     database = "validation";
-    checkCommand = pkgs.lib.getExe rejectCallback;
+    check = rejectCallback;
   };
   pgWaitValidator = tools.mkPostgresqlValidator {
+    inherit postgresql;
     dumpRelativePath = "pg-dump";
     database = "validation";
-    checkCommand = pkgs.lib.getExe waitCallback;
+    check = waitCallback;
   };
   couch = tools.mkCouchdbRecovery {
     sourceDirectory = "/tmp/primitives-source-couchdb";
     nodeName = "couchdb@localhost";
-    checkCommand = pkgs.lib.getExe couchCallback;
+    inherit couchdb erlang;
+    check = couchCallback;
   };
   couchReject = tools.mkCouchdbRecovery {
+    inherit couchdb erlang;
     sourceDirectory = "/tmp/primitives-source-couchdb";
     nodeName = "couchdb@localhost";
-    checkCommand = pkgs.lib.getExe rejectCallback;
+    check = rejectCallback;
   };
   couchWait = tools.mkCouchdbRecovery {
+    inherit couchdb erlang;
     sourceDirectory = "/tmp/primitives-source-couchdb";
     nodeName = "couchdb@localhost";
-    checkCommand = pkgs.lib.getExe waitCallback;
+    check = waitCallback;
   };
   copyFailure = pkgs.writeShellScriptBin "cp" ''
     ${pkgs.coreutils}/bin/cp "$@"
@@ -119,8 +133,12 @@ let
     exit 1
   '';
   copyWait = pkgs.writeShellScriptBin "cp" ''
+    fifo=$(${pkgs.coreutils}/bin/mktemp -u /tmp/capture-wait.XXXXXXXX)
+    ${pkgs.coreutils}/bin/mkfifo "$fifo"
+    exec 3<>"$fifo"
+    ${pkgs.coreutils}/bin/rm "$fifo"
     echo CAPTURE_COPY_READY
-    ${pkgs.coreutils}/bin/sleep 3
+    read -r -t 60 -u 3 || exit 1
   '';
   coreutilsWithCopy =
     copy:
@@ -144,12 +162,14 @@ let
   couchFailureCapture = failureTools.mkCouchdbRecovery {
     sourceDirectory = "/tmp/primitives-source-couchdb";
     nodeName = "couchdb@localhost";
-    checkCommand = pkgs.lib.getExe couchCallback;
+    inherit couchdb erlang;
+    check = couchCallback;
   };
   couchWaitCapture = waitTools.mkCouchdbRecovery {
     sourceDirectory = "/tmp/primitives-source-couchdb";
     nodeName = "couchdb@localhost";
-    checkCommand = pkgs.lib.getExe couchCallback;
+    inherit couchdb erlang;
+    check = couchCallback;
   };
 in
 pkgs.runCommand "database-recovery-roundtrips"
@@ -157,31 +177,37 @@ pkgs.runCommand "database-recovery-roundtrips"
     nativeBuildInputs = [
       pkgs.bash
       pkgs.coreutils
-      pkgs.couchdb3
+      couchdb
       pkgs.curl
-      pkgs.beamPackages.erlang
+      erlang
       pkgs.jq
       pkgs.nss_wrapper
-      pkgs.postgresql_18
+      pkgs.util-linux
+      postgresql
     ];
   }
   ''
     mkdir -p "$out"
-    export TEST_PG_VALIDATOR=${isolated pgValidator}
-    export TEST_PG_REJECT_VALIDATOR=${isolated pgRejectValidator}
-    export TEST_PG_WAIT_VALIDATOR=${pgWaitValidator}
-    export TEST_COUCH_VALIDATOR=${isolated couch.validateCommand}
-    export TEST_COUCH_REJECT_VALIDATOR=${isolated couchReject.validateCommand}
-    export TEST_COUCH_WAIT_VALIDATOR=${couchWait.validateCommand}
-    export TEST_COUCH_CAPTURE=${couch.captureCommand}
-    export TEST_COUCH_FAILURE_CAPTURE=${couchFailureCapture.captureCommand}
-    export TEST_COUCH_WAIT_CAPTURE=${couchWaitCapture.captureCommand}
-    export TEST_COUCHDB=${pkgs.couchdb3}/bin/couchdb
-    export TEST_COUCHDB_DEFAULT_INI=${pkgs.couchdb3}/etc/default.ini
-    export TEST_EPMD=${pkgs.beamPackages.erlang}/bin/epmd
+    export TEST_PG_VALIDATOR=${isolated (pkgs.lib.getExe pgValidator)}
+    export TEST_PG_REJECT_VALIDATOR=${isolated (pkgs.lib.getExe pgRejectValidator)}
+    export TEST_PG_WAIT_VALIDATOR=${pkgs.lib.getExe pgWaitValidator}
+    export TEST_COUCH_VALIDATOR=${isolated (pkgs.lib.getExe couch.validate)}
+    export TEST_COUCH_REJECT_VALIDATOR=${isolated (pkgs.lib.getExe couchReject.validate)}
+    export TEST_COUCH_WAIT_VALIDATOR=${pkgs.lib.getExe couchWait.validate}
+    export TEST_COUCH_CAPTURE=${pkgs.lib.getExe couch.capture}
+    export TEST_COUCH_FAILURE_CAPTURE=${pkgs.lib.getExe couchFailureCapture.capture}
+    export TEST_COUCH_WAIT_CAPTURE=${pkgs.lib.getExe couchWaitCapture.capture}
+    export TEST_COUCHDB=${couchdb}/bin/couchdb
+    export TEST_COUCHDB_DEFAULT_INI=${couchdb}/etc/default.ini
+    export TEST_EPMD=${erlang}/bin/epmd
     export TEST_CA_CERTIFICATES=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
-    export TEST_NSS_WRAPPER=${pkgs.nss_wrapper}/lib/libnss_wrapper.so
     export TEST_SANDBOX_FIXTURE=${isolated sandboxFixture}
-    bash ${./runtime/database-recovery.sh} > "$out/results.log" 2>&1 || { cat "$out/results.log"; exit 1; }
+    export PATH=${
+      pkgs.lib.makeBinPath [
+        postgresql
+        couchdb
+      ]
+    }:"$PATH"
+    timeout --kill-after=10s 10m bash ${./runtime/database-recovery.sh} > "$out/results.log" 2>&1 || { cat "$out/results.log"; exit 1; }
     cat "$out/results.log"
   ''

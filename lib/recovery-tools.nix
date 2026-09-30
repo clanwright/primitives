@@ -1,101 +1,111 @@
 { pkgs }:
 let
   inherit (pkgs) lib;
-  immutable =
-    path:
-    builtins.isString path
-    && builtins.getContext path != { }
-    && builtins.match "/nix/store/[a-z0-9]{32}-[^/]+(/[^/]+)+" path != null
-    && !(builtins.any (part: part == "." || part == "..") (lib.splitString "/" path));
-  command =
+  executablePackage =
+    package:
+    lib.isDerivation package
+    && builtins.isString (package.meta.mainProgram or null)
+    && package.meta.mainProgram != "";
+  application =
     name: script: dependencies: variables:
-    lib.getExe (
-      pkgs.writeShellApplication {
-        inherit name;
-        runtimeInputs = [
+    let
+      runtime = pkgs.writeShellApplication {
+        name = "${name}-runtime";
+        meta.mainProgram = "${name}-runtime";
+        inheritPath = false;
+        runtimeInputs = dependencies ++ [
           pkgs.coreutils
           pkgs.findutils
-        ]
-        ++ dependencies;
-        text = ''
-          exec ${pkgs.coreutils}/bin/env -i PATH=${
-            lib.escapeShellArg (
-              lib.makeBinPath (
-                [
-                  pkgs.coreutils
-                  pkgs.findutils
-                ]
-                ++ dependencies
-              )
-            )
-          } ${
-            lib.concatStringsSep " " (
-              lib.mapAttrsToList (key: value: "${key}=${lib.escapeShellArg value}") variables
-            )
-          } \
-            ${pkgs.bash}/bin/bash ${script} "$@"
-        '';
-      }
-    );
-  common = {
-    RECOVERY_COMMON = "${./recovery/common.sh}";
-  };
+        ];
+        runtimeEnv = variables;
+        text = builtins.readFile ./recovery/common.sh + "\n" + builtins.readFile script;
+      };
+    in
+    pkgs.writeShellApplication {
+      inherit name;
+      meta.mainProgram = name;
+      inheritPath = false;
+      # Clear inherited environment before the native writer sets PATH and vars.
+      text = ''
+        exec ${lib.getExe' pkgs.coreutils "env"} -i ${lib.getExe runtime} "$@"
+      '';
+    };
 in
-assert lib.versions.major pkgs.postgresql_18.version == "18";
-assert pkgs.couchdb3.version == "3.5.2";
 {
-  # Capture uses the existing Clan native custom-format pg-dump generation.
+  # The caller supplies a native custom-format archive from the source package.
   mkPostgresqlValidator =
     {
+      postgresql,
       dumpRelativePath,
       database,
-      checkCommand,
+      check,
     }:
-    assert immutable checkCommand;
+    assert lib.isDerivation postgresql;
+    assert
+      builtins.isString (postgresql.version or null)
+      && postgresql.version != ""
+      && lib.versions.major postgresql.version == "18";
+    assert executablePackage check;
     assert dumpRelativePath != "" && !(lib.hasPrefix "/" dumpRelativePath);
     assert
       !(builtins.any (part: part == ".." || part == "." || part == "") (
         lib.splitString "/" dumpRelativePath
       ));
-    command "validate-postgresql-recovery" ./recovery/postgresql-validate.sh
-      [ pkgs.postgresql_18 pkgs.gnugrep ]
-      (
-        common
-        // {
-          DUMP_RELATIVE_PATH = dumpRelativePath;
-          PGDATABASE = database;
-          CHECK_COMMAND = checkCommand;
-          NSS_LIBRARY = "${pkgs.nss_wrapper}/lib/libnss_wrapper.so";
-        }
-      );
+    application "validate-postgresql-recovery" ./recovery/postgresql-validate.sh
+      [ postgresql pkgs.gnugrep ]
+      {
+        DUMP_RELATIVE_PATH = dumpRelativePath;
+        PGDATABASE = database;
+        CHECK_COMMAND = lib.getExe check;
+        NSS_LIBRARY = "${lib.getLib pkgs.nss_wrapper}/lib/libnss_wrapper.so";
+      };
   mkCouchdbRecovery =
     {
+      couchdb,
+      erlang,
       sourceDirectory,
-      checkCommand,
+      check,
       nodeName ? "couchdb@localhost",
     }:
-    assert immutable checkCommand;
+    assert lib.isDerivation couchdb;
+    assert (couchdb.version or "") == "3.5.2";
+    assert lib.assertMsg (lib.isDerivation erlang)
+      "mkCouchdbRecovery: erlang must be a derivation package";
+    let
+      override = couchdb.override or null;
+      hasOverrideMetadata =
+        builtins.isAttrs override
+        && builtins.isFunction (override.__functor or null)
+        && builtins.isAttrs (override.__functionArgs or null);
+      supportsComponent =
+        hasOverrideMetadata && lib.isFunction override && (lib.functionArgs override ? beamMinimalPackages);
+      replayed = override { beamMinimalPackages = { inherit erlang; }; };
+      componentReplay = builtins.tryEval (
+        replayed.drvPath == couchdb.drvPath && replayed.outPath == couchdb.outPath
+      );
+    in
+    assert lib.assertMsg supportsComponent
+      "mkCouchdbRecovery: couchdb lacks supported native beamMinimalPackages override metadata";
+    assert lib.assertMsg componentReplay.success
+      "mkCouchdbRecovery: native CouchDB component replay failed";
+    assert lib.assertMsg componentReplay.value
+      "mkCouchdbRecovery: erlang does not reproduce the supplied couchdb derivation and output";
+    assert executablePackage check;
     assert lib.hasPrefix "/" sourceDirectory;
     assert builtins.match "[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+" nodeName != null;
     {
-      captureCommand = command "capture-couchdb-recovery" ./recovery/couchdb-capture.sh [ pkgs.jq ] (
-        common
-        // {
-          SOURCE_DIRECTORY = sourceDirectory;
-          NODE_NAME = nodeName;
-        }
-      );
-      validateCommand =
-        command "validate-couchdb-recovery" ./recovery/couchdb-validate.sh
-          [ pkgs.couchdb3 pkgs.beamPackages.erlang pkgs.curl pkgs.jq pkgs.gnused ]
-          (
-            common
-            // {
-              NODE_NAME = nodeName;
-              CHECK_COMMAND = checkCommand;
-              COUCHDB_DEFAULT_INI = "${pkgs.couchdb3}/etc/default.ini";
-              CA_CERTIFICATES = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-            }
-          );
+      capture = application "capture-couchdb-recovery" ./recovery/couchdb-capture.sh [ pkgs.jq ] {
+        SOURCE_DIRECTORY = sourceDirectory;
+        NODE_NAME = nodeName;
+      };
+      validate =
+        application "validate-couchdb-recovery" ./recovery/couchdb-validate.sh
+          [ couchdb erlang pkgs.curl pkgs.jq pkgs.gnused ]
+          ({
+            NODE_NAME = nodeName;
+            CHECK_COMMAND = lib.getExe check;
+            COUCHDB_DEFAULT_INI = "${couchdb}/etc/default.ini";
+            CA_CERTIFICATES = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+          });
     };
 }

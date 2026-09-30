@@ -6,8 +6,96 @@
 let
   modules = self.nixosModules;
   inherit (nixpkgs) lib;
+  postgresNameCheck =
+    lifecycle: name:
+    let
+      c =
+        (lib.evalModules {
+          specialArgs.pkgs = nixpkgs.legacyPackages.x86_64-linux;
+          modules = [
+            modules.postgresql
+            {
+              options = {
+                assertions = lib.mkOption {
+                  type = lib.types.listOf (
+                    lib.types.submodule {
+                      options = {
+                        assertion = lib.mkOption { type = lib.types.bool; };
+                        message = lib.mkOption { type = lib.types.str; };
+                      };
+                    }
+                  );
+                };
+                clan.core.postgresql = {
+                  enable = lib.mkOption {
+                    type = lib.types.bool;
+                    default = false;
+                  };
+                  users = lib.mkOption {
+                    type = lib.types.attrsOf (lib.types.submodule { });
+                    default = { };
+                  };
+                  databases = lib.mkOption {
+                    type = lib.types.attrsOf (
+                      lib.types.submodule {
+                        options = {
+                          service = lib.mkOption { type = lib.types.nonEmptyStr; };
+                          create.options.OWNER = lib.mkOption { type = lib.types.nonEmptyStr; };
+                          restore.stopOnRestore = lib.mkOption {
+                            type = lib.types.listOf lib.types.nonEmptyStr;
+                          };
+                        };
+                      }
+                    );
+                    default = { };
+                  };
+                };
+                clan.core.state = lib.mkOption {
+                  type = lib.types.attrsOf (
+                    lib.types.submodule {
+                      options.folders = lib.mkOption { type = lib.types.listOf lib.types.str; };
+                    }
+                  );
+                  default = { };
+                };
+                services.postgresql.package = lib.mkOption { type = lib.types.package; };
+              };
+              config.services.clanwright.primitives.postgresql.databases.${name} = {
+                inherit lifecycle;
+                user = "name-check";
+                stateName = "name-check";
+              };
+            }
+          ];
+        }).config;
+    in
+    {
+      failedAssertions = map (a: a.message) (builtins.filter (a: !a.assertion) c.assertions);
+      databases = builtins.attrNames c.clan.core.postgresql.databases;
+      state = c.clan.core.state.name-check.folders or [ ];
+    };
+  invalidPostgresNames = [
+    ""
+    "."
+    ".."
+    "/"
+    "/alpha"
+    "alpha/"
+    "bad/name"
+    "../alpha"
+  ];
+  validPostgresNames = [
+    "alpha"
+    "db-name"
+    "db.name"
+    ".alpha"
+    "..."
+    "alpha..beta"
+    "database with spaces"
+    "база"
+  ];
   evaluate =
-    couchLifecycle: alphaLifecycle: pgLifecycle: foreignPackages: duplicateStateName:
+    configurePrimitives: couchLifecycle: alphaLifecycle: pgLifecycle: foreignPackages: duplicateStateName:
     let
       clan = clan-core.lib.clan {
         self.inputs.self.clan = clan.config;
@@ -35,7 +123,7 @@ let
               system.stateVersion = "26.11";
               sops.defaultSopsFile = builtins.toFile "primitives-empty-sops.yaml" "sops:\n  age: []\n";
               sops.age.keyFile = "/run/fixture/age-key";
-              services.clanwright.primitives = {
+              services.clanwright.primitives = lib.mkIf configurePrimitives {
                 couchdb = {
                   enable = true;
                   lifecycle = couchLifecycle;
@@ -77,6 +165,16 @@ let
       couchState = c.clan.core.state.fixture-couch.folders;
       couchUid = c.users.users.couchdb.uid;
       couchGid = c.users.groups.couchdb.gid;
+      couchIdentity = lib.getAttrs [
+        "description"
+        "group"
+        "home"
+        "createHome"
+        "isSystemUser"
+        "isNormalUser"
+        "useDefaultShell"
+        "shell"
+      ] c.users.users.couchdb;
       expectedCouchUid = c.ids.uids.couchdb;
       expectedCouchGid = c.ids.gids.couchdb;
       couchSecretPath = c.sops.secrets.fixture-admin-ini.path;
@@ -84,6 +182,12 @@ let
       couchGroup = c.sops.secrets.fixture-admin-ini.group;
       couchMode = c.sops.secrets.fixture-admin-ini.mode;
       couchRestart = c.sops.secrets.fixture-admin-ini.restartUnits;
+      couchSecretPresent = builtins.hasAttr "fixture-admin-ini" c.sops.secrets;
+      primitiveStates = lib.intersectLists [
+        "fixture-couch"
+        "alpha-db"
+        "beta-db"
+      ] (builtins.attrNames c.clan.core.state);
       postgresEnabled = c.clan.core.postgresql.enable;
       postgresVersion =
         if alphaLifecycle == "enabled" || pgLifecycle == "enabled" then
@@ -113,22 +217,77 @@ let
       firewall = c.networking.firewall.allowedTCPPorts;
       failedAssertions = map (a: a.message) (builtins.filter (a: !a.assertion) c.assertions);
     };
-  active = evaluate "enabled" "enabled" "enabled" false false;
-  retained = evaluate "disabled-retained" "enabled" "disabled-retained" false false;
-  allRetained = evaluate "disabled-retained" "disabled-retained" "disabled-retained" false false;
-  foreignHostPackages = evaluate "enabled" "enabled" "enabled" true false;
+  defaultDisabled =
+    evaluate false "disabled-retained" "disabled-retained" "disabled-retained" false
+      false;
+  active = evaluate true "enabled" "enabled" "enabled" false false;
+  retained = evaluate true "disabled-retained" "enabled" "disabled-retained" false false;
+  allRetained = evaluate true "disabled-retained" "disabled-retained" "disabled-retained" false false;
+  foreignHostPackages = evaluate true "enabled" "enabled" "enabled" true false;
   duplicateStateName =
-    evaluate "disabled-retained" "disabled-retained" "disabled-retained" false
+    evaluate true "disabled-retained" "disabled-retained" "disabled-retained" false
       true;
   expectedCouch = nixpkgs.legacyPackages.x86_64-linux.couchdb3.outPath;
   expectedPostgres = nixpkgs.legacyPackages.x86_64-linux.postgresql_18.outPath;
 in
+assert lib.all
+  (
+    lifecycle:
+    lib.all (
+      name:
+      (postgresNameCheck lifecycle name).failedAssertions == [
+        "Primitives PostgreSQL database names must be non-empty path components other than '.' or '..'."
+      ]
+    ) invalidPostgresNames
+    && lib.all (
+      name:
+      let
+        checked = postgresNameCheck lifecycle name;
+      in
+      checked.failedAssertions == [ ]
+      && checked.databases == lib.optional (lifecycle == "enabled") name
+      && checked.state == lib.optional (lifecycle == "disabled-retained") "/var/backup/postgres/${name}"
+    ) validPostgresNames
+  )
+  [
+    "enabled"
+    "disabled-retained"
+  ];
 assert
-  active.failedAssertions == [ ]
+  defaultDisabled.failedAssertions == [ ]
+  && active.failedAssertions == [ ]
   && retained.failedAssertions == [ ]
   && allRetained.failedAssertions == [ ]
   && foreignHostPackages.failedAssertions == [ ];
+assert
+  defaultDisabled.couchEnabled == false
+  && defaultDisabled.postgresEnabled == false
+  && defaultDisabled.postgresDatabases == [ ]
+  && defaultDisabled.primitiveStates == [ ]
+  && defaultDisabled.couchSecretPresent == false;
 assert active.couchEnabled && active.couchBind == "127.0.0.1" && active.couchPort == 5984;
+assert lib.all
+  (
+    fixture:
+    fixture.couchUid == fixture.expectedCouchUid
+    && fixture.couchGid == fixture.expectedCouchGid
+    &&
+      fixture.couchIdentity == {
+        description = "CouchDB Server user";
+        group = "couchdb";
+        home = "/var/empty";
+        createHome = false;
+        isSystemUser = true;
+        isNormalUser = false;
+        useDefaultShell = false;
+        shell = "${nixpkgs.legacyPackages.x86_64-linux.shadow}/bin/nologin";
+      }
+  )
+  [
+    active
+    retained
+    allRetained
+  ];
 assert
   active.couchAdminPass == null && active.couchSecretFiles == [ "/run/secrets/fixture-admin-ini" ];
 assert
@@ -185,6 +344,8 @@ assert
   && retained.firewall == [ ]
   && allRetained.firewall == [ ]
   && foreignHostPackages.firewall == [ ];
-assert builtins.elem "Primitives PostgreSQL requests must have distinct stateName values."
-  duplicateStateName.failedAssertions;
+assert
+  duplicateStateName.failedAssertions == [
+    "Primitives PostgreSQL requests must have distinct stateName values."
+  ];
 true
