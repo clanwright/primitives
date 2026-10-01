@@ -1,3 +1,7 @@
+> **Archived.** This module now lives in the Clanwright monorepository as
+> `bricks/primitives` (https://github.com/ibelyasov/clanwright) and is no longer
+> developed or released here.
+
 # Primitives
 
 Primitives provides generic CouchDB and PostgreSQL NixOS modules with retained
